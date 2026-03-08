@@ -870,3 +870,426 @@ Example:
 > "I'll use a Key Generation Service that pre‑generates batches of random 7‑character strings and stores them in a small database. Application servers request batches of 1000 keys from the KGS and serve them locally. This ensures uniqueness without database checks on every write. For caching, I'll use a Redis cluster with LRU eviction, following the cache‑aside pattern. Analytics events will be published to Kafka, consumed by Flink jobs that update ClickHouse tables for real‑time dashboards and also archive raw data to S3. Rate limiting will be implemented at the API gateway using token buckets stored in Redis."
 
 This shows you've considered each component in depth.
+
+
+# Trade-offs and Discussion – URL Shortener (Interviewer's Answers)
+
+Here are the answers an interviewer might give to your clarifying questions about trade-offs for a URL shortening service. These are not definitive "correct" answers – they represent the kinds of constraints and preferences an interviewer might express, and they expect you to navigate these trade-offs in your design.
+
+---
+
+## Consistency vs. Availability
+**Question:** *Where do we stand on the CAP theorem? What trade‑offs are we making?*
+
+**Interviewer:** This is a fundamental trade-off. Given our requirements:
+- We need **high availability** (99.99%) – redirection must never fail.
+- We can tolerate **eventual consistency** for reads – it's okay if a newly created URL takes a few seconds to propagate.
+- However, for **custom aliases**, we need strong consistency to ensure uniqueness.
+
+**Where we stand:** We are **AP (Available + Partition Tolerant)** for the core redirect path. During a network partition, we will continue serving redirects (possibly stale) rather than returning errors. For custom aliases, we temporarily become **CP** by using conditional writes that require consensus.
+
+**Trade‑off:** Users may occasionally see a 404 for a very fresh URL, but the system stays up. That's acceptable.
+
+---
+
+## Cost vs. Performance
+**Question:** *Are we optimising for lower cost (e.g., fewer replicas, less caching) or higher performance?*
+
+**Interviewer:** This is a public-facing service where user experience is critical. We should **optimise for performance** first, but within reasonable cost constraints. For example:
+- We'll use caching (Redis) even though it adds cost, because it drastically reduces latency and database load.
+- We'll use 3× replication for durability, even though it triples storage cost.
+- We'll use auto-scaling to handle peaks without over-provisioning 24/7.
+
+If you have ideas to reduce cost without sacrificing performance (e.g., using spot instances for non-critical workers), mention them. But the primary goal is performance.
+
+**Trade‑off:** Higher performance means higher cost (more servers, more caching, more replicas). We accept that.
+
+---
+
+## Simplicity vs. Scalability
+**Question:** *Should we start with a simpler design and plan to scale later, or build for extreme scale from day one?*
+
+**Interviewer:** Given that we're designing for a hypothetical large-scale service (100M URLs/month), we should **build for scale from the start**. However, you can mention that in a real-world scenario, you might start simpler and evolve. For this interview, design for scale.
+
+But also show you understand the trade‑off: building for scale adds complexity (sharding, distributed caching, multi-region). If you were building an MVP, you might start with a monolith and single database, then scale later. For our requirements, we need the scalable design.
+
+**Trade‑off:** More complexity now, but avoids painful re-architecture later.
+
+---
+
+## Synchronous vs. Asynchronous
+**Question:** *Which operations benefit from async processing? What complexity does it add?*
+
+**Interviewer:** 
+- **Synchronous (must be sync):** URL creation and redirection – users expect immediate responses.
+- **Asynchronous (can be async):** Analytics tracking. Emit an event and process it later.
+
+**Benefits of async:** Decouples analytics from the critical path, ensuring redirect latency isn't affected by analytics processing. Also allows buffering during traffic spikes.
+
+**Complexity added:** Need a message queue (Kafka/SQS), consumers, and a separate analytics storage. Must handle duplicate events (idempotency) and ensure no data loss.
+
+**Trade‑off:** More moving parts, but better performance and reliability for the core feature.
+
+---
+
+## SQL vs. NoSQL
+**Question:** *Why choose one over the other given the access patterns?*
+
+**Interviewer:** Based on our access patterns (simple key-value lookups, high throughput, need for horizontal scaling), **NoSQL is the better fit**. Reasons:
+- **Scalability:** NoSQL databases like DynamoDB or Cassandra scale horizontally out of the box. SQL can scale but requires manual sharding, which adds complexity.
+- **Performance:** NoSQL offers consistent low-latency reads/writes at scale.
+- **Data model:** We don't need joins, complex transactions, or relationships. A key-value store is perfect.
+
+**If you chose SQL:** You'd need to justify it – perhaps for strong consistency or because the team is more familiar with SQL. But you'd then have to explain how you'd shard (e.g., application-level sharding based on short_code) and handle the complexity. Both are valid, but NoSQL is the more natural fit.
+
+**Trade‑off:** NoSQL may lack some features (like secondary indexes) – but we can add GSIs or denormalise.
+
+---
+
+## Denormalisation vs. Normalisation
+**Question:** *When to denormalise for performance?*
+
+**Interviewer:** For a URL shortener, denormalisation is relevant in a few places:
+- **Caching:** We're denormalising by storing the short_code → long_url mapping in Redis, separate from the primary store.
+- **Analytics:** We might store aggregated click counts directly in the URL mappings table (denormalised) to avoid joins. This adds a write operation on every click but makes reads faster.
+- **User listings:** If we need to list a user's URLs, we could store the same data in two tables: one keyed by short_code, another keyed by user_id (duplication). This is denormalisation for query efficiency.
+
+**General principle:** Denormalise when read performance is critical and you can tolerate some duplication and eventual consistency. For our core, we denormalise by caching. For analytics, we might keep counts separate or denormalise – it's a trade‑off.
+
+**Trade‑off:** Denormalisation speeds up reads but makes writes more complex and can lead to inconsistency if not managed carefully.
+
+---
+
+## Summary of Trade‑off Preferences
+
+| Trade‑off | Our Preference |
+|-----------|----------------|
+| **Consistency vs. Availability** | Availability first; strong consistency only for uniqueness |
+| **Cost vs. Performance** | Performance first, but be cost-aware |
+| **Simplicity vs. Scalability** | Build for scale from the start |
+| **Synchronous vs. Asynchronous** | Sync for user actions; async for analytics |
+| **SQL vs. NoSQL** | NoSQL (DynamoDB/Cassandra) |
+| **Denormalisation vs. Normalisation** | Denormalise for performance where needed |
+
+---
+
+## What the Candidate Should Do Next
+
+Now that you understand the trade‑offs, you should:
+
+1. **Incorporate these trade‑offs into your final design summary** – show that you've considered alternatives and made conscious choices.
+2. **Be prepared to defend your choices** – if the interviewer pushes back (e.g., "Why not use SQL?"), explain your reasoning.
+3. **Mention how you'd handle the downsides** – e.g., if you chose eventual consistency, explain how you'd handle the rare case of a stale read (maybe a "read-after-write" consistency option for users who just created a link).
+
+Example:
+> "I've chosen to prioritise availability and performance over strong consistency, which is why I'm using DynamoDB with eventual consistency for reads. For custom aliases, I'll use conditional writes to ensure uniqueness. I'm accepting that a newly created URL might not be immediately available in all regions, but that's a rare edge case. To mitigate it, I could implement read-after-write consistency for the user who just created the link by reading from the primary region. This is a trade‑off I'm comfortable with."
+
+This shows you understand the nuances of system design.
+
+# Failure Scenarios and Mitigations – URL Shortener (Interviewer's Answers)
+
+Here are the answers an interviewer might give to your clarifying questions about failure scenarios and mitigations for a URL shortening service.
+
+---
+
+## Single Points of Failure
+**Question:** *Which components could bring down the system? How to eliminate them (redundancy, failover)?*
+
+**Interviewer:** We need to identify potential single points of failure at each layer:
+- **DNS:** Could be a SPOF if we rely on a single DNS provider. Use multiple DNS providers or Route 53's highly available design.
+- **Load Balancer:** A single load balancer instance can fail. Use a multi-AZ load balancer (e.g., AWS ALB is regional and inherently redundant).
+- **Application Servers:** Individual servers can fail. Run multiple instances in an auto-scaling group across availability zones.
+- **Cache (Redis):** A single Redis node can fail. Use Redis Cluster with replicas or ElastiCache for Redis with multi-AZ automatic failover.
+- **Database:** A single database instance is a SPOF. Use managed databases with multi-AZ replication (e.g., DynamoDB is already multi-AZ; Cassandra with replication factor 3 across AZs).
+- **Message Queue:** Kafka or SQS are inherently distributed – single broker failure should not stop the system if configured with replication.
+
+The key is **redundancy at every layer** and **automatic failover** so that no single component failure causes downtime.
+
+---
+
+## Database Failure
+**Question:** *What if the primary database goes down? (Replica promotion, multi‑AZ)*
+
+**Interviewer:** Our database choice should handle this automatically:
+- If using **DynamoDB**, it's a managed service with multi-AZ replication by default. If one replica fails, requests are automatically routed to other replicas with no downtime.
+- If using **Cassandra**, we configure a replication factor of 3 across multiple availability zones. If a node goes down, reads and writes can still achieve quorum (e.g., consistency level = LOCAL_QUORUM) using the remaining nodes. The failed node will be replaced automatically.
+- If using **SQL** with a primary and replicas, we'd need automated failover (e.g., RDS Multi-AZ with automatic failover to standby). Writes would be redirected to the new primary.
+
+In any case, we design so that a single database node failure does not cause downtime – reads and writes continue (maybe with slightly reduced capacity) while the system recovers.
+
+---
+
+## Cache Failure
+**Question:** *Can the system survive a cache outage? Fallback to database?*
+
+**Interviewer:** Yes, the cache is for performance, not availability. If Redis goes down:
+- All redirect requests will miss the cache and hit the database directly.
+- This will increase latency and database load, but the system remains operational.
+- Once Redis recovers, the cache will gradually warm up again.
+
+To minimise impact:
+- Use Redis Cluster with replicas so a single node failure doesn't take down the entire cache.
+- Consider a multi-AZ Redis deployment for automatic failover.
+- Monitor cache health and alert immediately.
+
+The database must be provisioned to handle the full read load during a cache outage (possibly with reduced performance, but still functional).
+
+---
+
+## Service Overload
+**Question:** *How to handle traffic spikes (auto‑scaling, rate limiting, queueing)?*
+
+**Interviewer:** Multiple layers of protection:
+- **Auto‑scaling:** Application servers should scale out based on CPU or request count. Use target tracking scaling policies.
+- **Rate limiting:** Already implemented at the API gateway to reject excessive requests per IP. This protects against both abuse and unintentional spikes.
+- **Caching:** Absorbs a large portion of read traffic; hot URLs are served from cache, reducing load on app servers and database.
+- **Database:** DynamoDB auto-scales read/write capacity based on load. Cassandra can handle spikes if provisioned appropriately.
+- **Queueing:** For non‑critical operations (analytics), we use a queue to buffer events during spikes; workers process at their own pace.
+- **CDN:** For viral URLs, we can cache redirect responses at the edge (CloudFront) so that even the app servers are bypassed.
+
+The goal is to have **graceful degradation** – the system may become slower but should not fail completely.
+
+---
+
+## Network Partitions
+**Question:** *How does the system behave during a network split? (CAP trade‑off)*
+
+**Interviewer:** During a network partition, we must choose between consistency and availability. Based on our earlier trade‑off, we **prioritise availability**:
+- Reads may return stale data from the local replica.
+- Writes (new URLs) may be accepted in the partition, but if the partition affects the database quorum, some writes may fail or be queued.
+- For custom aliases that require uniqueness, writes may fail if they cannot achieve consensus.
+
+In a multi‑region active‑active setup with DynamoDB Global Tables, writes are eventually replicated across regions; during a partition, each region continues to accept writes, and conflicts are resolved via last‑write‑wins.
+
+Our design accepts that during a partition, the system remains available but may serve stale data or have temporary inconsistencies – which is acceptable for a URL shortener.
+
+---
+
+## Data Corruption
+**Question:** *How to recover from accidental deletions or corruption? (Backups, point‑in‑time recovery)*
+
+**Interviewer:** We need both **backups** and **point‑in‑time recovery (PITR)**:
+- **DynamoDB:** Enable PITR to restore to any point in the last 35 days. Also take daily on‑demand backups to S3 for long‑term retention.
+- **Cassandra:** Use `nodetool snapshot` regularly and store backups in S3. Can also use incremental backups.
+- **Application‑level protection:** Implement soft deletes? Possibly not for core, but for user‑facing deletes, we could mark as deleted rather than physically removing data, allowing recovery.
+
+In case of accidental deletion or corruption, we can restore the affected data from backups or PITR, possibly with some data loss (depending on recovery point).
+
+---
+
+## Regional Outage
+**Question:** *If multi‑region, how does failover work? (DNS, global load balancer)*
+
+**Interviewer:** For multi‑region deployment, we need:
+- **DNS failover:** Use Route 53 with health checks on each region's load balancer. If a region becomes unhealthy, Route 53 automatically routes traffic to the remaining healthy regions.
+- **Database replication:** For active‑active, each region already has its own database (DynamoDB Global Tables). For active‑passive, we promote a replica in another region to primary.
+- **Application servers:** Auto‑scaling in each region ensures capacity.
+
+During a regional outage:
+1. Health checks fail for that region's endpoints.
+2. Route 53 stops sending traffic to that region.
+3. All traffic is directed to other regions.
+4. If the database in the failed region was the primary (in active‑passive), we promote a replica in another region to primary (automated via database failover).
+5. Users may experience slightly higher latency but continue to use the service.
+
+This requires designing for cross‑region data replication and ensuring that applications can connect to any region.
+
+---
+
+## DDoS Attacks
+**Question:** *What mechanisms protect against DDoS? (Rate limiting, WAF, CDN)*
+
+**Interviewer:** Defence in depth:
+- **CDN (CloudFront):** Absorbs many types of DDoS attacks by caching content at the edge and filtering malicious traffic before it reaches origin.
+- **Web Application Firewall (WAF):** Can block malicious requests (SQL injection, XSS) and implement rate‑based rules.
+- **Rate limiting:** Already implemented per IP at the API gateway to limit request rates.
+- **AWS Shield (or similar):** Provides automatic DDoS protection at the network layer.
+- **Auto‑scaling:** Helps absorb traffic spikes, but DDoS can still overwhelm; rate limiting and WAF are first lines of defence.
+- **Monitoring and alerting:** Detect unusual traffic patterns and trigger mitigation.
+
+For a URL shortener, most DDoS would target the redirection endpoint. Since that's cheap to serve (cached responses), we can handle moderate attacks, but large‑scale attacks may still overwhelm. The above measures reduce risk.
+
+---
+
+## Summary of Mitigation Strategies
+
+| Failure Scenario | Mitigation |
+|------------------|------------|
+| **Single point of failure** | Redundancy at all layers (multi‑AZ, multiple instances) |
+| **Database failure** | Multi‑AZ replication, automatic failover |
+| **Cache failure** | Redis replication, fallback to database |
+| **Traffic spikes** | Auto‑scaling, rate limiting, CDN, queueing |
+| **Network partition** | AP design (eventual consistency), local reads/writes |
+| **Data corruption** | Backups, point‑in‑time recovery |
+| **Regional outage** | Multi‑region deployment, DNS failover |
+| **DDoS attack** | CDN, WAF, rate limiting, AWS Shield |
+
+---
+
+## What the Candidate Should Do Next
+
+Now that you understand the failure scenarios and expected mitigations, you should:
+
+1. **Incorporate these mitigations into your architecture diagram** – show redundancy, multi‑AZ, etc.
+2. **Explain how the system behaves during each failure** – e.g., "If the cache fails, redirects fall back to database, increasing latency but the system stays up."
+3. **Discuss trade‑offs** – e.g., multi‑region adds complexity and cost but improves availability.
+4. **Be prepared to dive deeper** – e.g., how exactly does DynamoDB handle a node failure? How does Route 53 health checking work?
+
+Example:
+> "To handle database failure, I'll use DynamoDB with multi‑AZ replication – it's fully managed and automatically routes requests away from unhealthy replicas. For cache failure, I'll deploy Redis Cluster with replicas; if the entire cluster fails, traffic falls back to DynamoDB. I'll also enable point‑in‑time recovery for DynamoDB to guard against accidental deletions. For regional outages, I'll use Route 53 health checks to route traffic away from an unhealthy region, and DynamoDB Global Tables to keep data in sync across regions."
+
+This shows you've thought about resilience at every level.
+
+
+# Scaling to the Next Level – URL Shortener (Interviewer's Answers)
+
+Here are the answers an interviewer might give to your clarifying questions about taking the URL shortener to extreme scale. These are advanced topics that demonstrate deeper system design knowledge.
+
+---
+
+## What if Traffic Grows 100×?
+**Question:** *What if traffic grows 100×? Which components become bottlenecks first?*
+
+**Interviewer:** Let's assume our current scale is 100M new URLs/month and 10B redirects/month. A 100× increase would mean:
+- **10B new URLs/month** (333M/day, 3,850 writes/sec average)
+- **1 trillion redirects/month** (33B/day, 385,000 reads/sec average)
+- **Storage:** 1.67 GB/day × 100 = 167 GB/day → 61 TB/year × 3 replication = 183 TB/year
+
+The first bottlenecks would be:
+
+1. **Database reads:** Even with caching, cache misses would generate 385K reads/sec to the database. DynamoDB can scale to millions of reads/sec with enough capacity, but cost becomes significant.
+2. **Cache cluster:** Redis would need to scale horizontally (cluster mode) to handle 385K reads/sec and store a larger working set. Memory would need to be increased significantly.
+3. **Application servers:** Would need to scale out to handle the request volume – but they're stateless, so auto-scaling can handle it.
+4. **Network bandwidth:** Redirects would generate ~77 GB/sec egress (385K/sec × 200 bytes). This would require multiple 100 GbE links and significant cost.
+5. **Key Generation Service:** Would need to generate 3,850 new keys per second – still feasible with pre-generated batches.
+6. **Analytics pipeline:** 385K events/sec would require a robust Kafka cluster and stream processing infrastructure.
+
+The **database reads** and **cache** would likely be the first to show strain if not properly scaled.
+
+---
+
+## Database Sharding
+**Question:** *Would we need to re‑shard? How to minimise downtime during rebalancing?*
+
+**Interviewer:** If we started with a fixed number of shards (e.g., 8 shards in Cassandra), at 100× scale we would need more shards to distribute the load and data. Re‑sharding (or rebalancing) is necessary.
+
+**Approaches to minimise downtime:**
+
+1. **Consistent hashing with virtual nodes (Cassandra):** Adding new nodes automatically redistributes data using consistent hashing. Only a fraction of data (1/N) moves per new node. This can happen online with minimal impact.
+
+2. **DynamoDB:** Automatic partitioning – as throughput or storage increases, DynamoDB splits partitions automatically with zero downtime. No manual re‑sharding needed.
+
+3. **Pre‑sharding (if using SQL):** Start with many more shards than needed (e.g., 1,000 logical shards) mapped to fewer physical nodes. When you need to scale, you move logical shards to new physical nodes. This avoids rehashing keys – just move data.
+
+4. **Range‑based sharding with dynamic splitting:** Use a shard key like `short_code` (which is roughly random) and split ranges when they get too large. Requires a metadata service to track which range belongs to which shard.
+
+**Minimising downtime:**
+- Perform rebalancing in the background during low traffic.
+- Use **read‑only mode** on shards being moved, or use **dual‑writing** (write to both old and new location during migration).
+- Use database tools that support online rebalancing (Cassandra, DynamoDB, Citus).
+
+For our design with DynamoDB, this is handled automatically – one less thing to worry about.
+
+---
+
+## Multi‑Region Active‑Active
+**Question:** *How to handle cross‑region replication and conflict resolution?*
+
+**Interviewer:** At extreme scale, multi‑region active‑active becomes essential for low latency and availability. Key challenges:
+
+**Cross‑region replication:**
+- **DynamoDB Global Tables:** Automatically replicates data across selected regions with last‑writer‑wins conflict resolution. You just enable it.
+- **Cassandra:** Can be configured for multi‑region with replication factor per region. Use `NetworkTopologyStrategy` and set `LOCAL_QUORUM` for reads/writes within a region, with asynchronous replication across regions.
+- **Custom solution:** Use Kafka to replicate change data capture (CDC) events between regions.
+
+**Conflict resolution strategies:**
+- **Last‑write‑wins (LWW):** Simplest; uses timestamps. But relies on clock synchronisation (use version numbers or logical clocks).
+- **Version vectors / vector clocks:** Track causal history; conflicts are returned to the application to resolve. More complex.
+- **CRDTs (Conflict‑free Replicated Data Types):** Data types that automatically merge (e.g., counters, sets). For a URL shortener, a simple LWW is sufficient because each short code is unique and never updated (except maybe expiration).
+
+**Consistency considerations:**
+- Reads in each region are eventually consistent with writes from other regions.
+- For custom aliases, you might need to check all regions or use a single region for uniqueness (defeating active‑active). A compromise: use a hash of the custom alias to determine a "home region" for that alias, and always route requests for that alias to its home region.
+
+At our scale, we'd likely use DynamoDB Global Tables for simplicity.
+
+---
+
+## Advanced Caching
+**Question:** *Would we use CDN for dynamic content, edge computing (CloudFlare Workers)?*
+
+**Interviewer:** Yes, at extreme scale we can push caching even closer to users:
+
+**CDN for redirects:**
+- Configure CloudFront (or other CDN) to cache HTTP 301/302 responses for popular short URLs. The CDN edge returns the redirect without hitting our origin.
+- Cache key = short code. Set TTL based on popularity – longer for extremely hot URLs.
+- This can absorb a huge percentage of read traffic (80%+).
+
+**Edge computing (CloudFlare Workers / Lambda@Edge):**
+- Run lightweight code at the edge to handle redirects without even hitting our regional load balancers.
+- Worker can check a local edge cache, then if miss, fetch from regional cache or database via a faster path.
+- Can also handle URL creation? Possibly, but creation is lower volume and might still need origin.
+
+**Benefits:**
+- Reduces latency to single‑digit milliseconds worldwide.
+- Offloads traffic from origin infrastructure – huge cost savings.
+- Scales automatically with CDN's global network.
+
+**Challenges:**
+- Cache invalidation – if a URL needs to be updated or expires, we need to purge CDN caches (can be done via API).
+- Consistency – edge cache may serve stale data for a short time (acceptable for this use case).
+
+At 100× scale, this becomes almost mandatory to keep costs manageable and latency low.
+
+---
+
+## Microservices vs. Monolith
+**Question:** *Would we split into microservices? How would they communicate?*
+
+**Interviewer:** For a URL shortener, the core functionality is simple – it could remain a **monolith** even at large scale. However, as we add features, we might split:
+
+**Potential microservice boundaries:**
+- **URL Service:** Core shortening and redirection.
+- **Analytics Service:** Collects and serves click statistics.
+- **User Service:** Manages user accounts (if added).
+- **Key Generation Service:** Dedicated service for handing out short codes.
+- **Expiration Service:** Background service to delete/archive expired URLs.
+
+**Communication:**
+- **Synchronous (HTTP/gRPC):** For request‑response between services (e.g., URL Service calls User Service to validate API key). Use gRPC for low latency and efficiency.
+- **Asynchronous (events/messages):** For decoupled workflows (e.g., URL Service emits "URL created" event; Analytics Service consumes it). Use Kafka.
+
+**API Gateway:** Single entry point that routes requests to appropriate services.
+
+**Trade‑offs:**
+- **Pros:** Independent scaling, team autonomy, technology diversity.
+- **Cons:** Increased complexity, latency, operational overhead.
+
+At our scale, a well‑factored monolith could still work, but if we have multiple teams, microservices make sense. For this design, we can mention that we'd likely keep it as a modular monolith initially, then split if needed.
+
+---
+
+## Summary of Extreme Scaling Strategies
+
+| Challenge | Solution |
+|-----------|----------|
+| **100× traffic growth** | Auto‑scaling, CDN for redirects, edge computing, database auto‑partitioning |
+| **Database re‑sharding** | Use DynamoDB (auto‑partitioning) or Cassandra (consistent hashing) to avoid manual re‑sharding |
+| **Multi‑region active‑active** | DynamoDB Global Tables or Cassandra multi‑region; LWW conflict resolution |
+| **Advanced caching** | CDN for redirects, edge workers, multi‑layer caching |
+| **Microservices** | Split by domain (URL, Analytics, User, KGS); communicate via gRPC and Kafka |
+
+---
+
+## What the Candidate Should Do Next
+
+Now that you've discussed extreme scaling, you should:
+
+1. **Summarise how your design would evolve** – what you'd add or change to handle 100× traffic.
+2. **Highlight the most critical bottlenecks** and how you'd address them.
+3. **Show you understand the trade‑offs** – e.g., edge computing adds cache invalidation complexity but dramatically reduces latency and cost.
+
+Example:
+> "At 100× scale, I'd first push redirects to the edge using CloudFront with Lambda@Edge, caching popular redirects and handling requests close to users. This would absorb the majority of read traffic. I'd rely on DynamoDB's automatic partitioning to handle database scaling, and use Global Tables for multi‑region active‑active replication with last‑write‑wins conflict resolution. For analytics, I'd scale Kafka to handle millions of events per second and use stream processors to aggregate data in real time. The core URL service might remain a monolith, but I'd consider splitting out the Key Generation Service and Analytics Service as separate microservices if team size warranted it."
+
+This demonstrates you can think beyond the initial design and anticipate future challenges.
