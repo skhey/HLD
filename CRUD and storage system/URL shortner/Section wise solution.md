@@ -301,3 +301,150 @@ Example:
 - 5‑year storage: 1.67 GB × 365 × 5 ≈ 3.05 TB × 3 (replication) ≈ 9.15 TB
 
 These numbers will drive your design decisions.
+
+
+# API Design – URL Shortener (Interviewer's Answers)
+
+Here are the answers an interviewer might give to your clarifying questions about API design for a URL shortening service.
+
+---
+
+## API Style
+**Question:** *REST, GraphQL, gRPC, or custom? Any preference?*
+
+**Interviewer:** Let's use **REST** – it's simple, widely understood, and perfect for this use case. We have straightforward resource operations (create a short URL, retrieve long URL). No need for GraphQL's complexity or gRPC's overhead for a public-facing API.
+
+---
+
+## Endpoints
+**Question:** *What are the main endpoints and their HTTP methods?*
+
+**Interviewer:** We need just two core endpoints:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/shorten` | `POST` | Create a new short URL |
+| `/{shortCode}` | `GET` | Redirect to the original long URL |
+
+If we add analytics later, we might add:
+| `/analytics/{shortCode}` | `GET` | Retrieve click statistics |
+
+For optional features (if time permits):
+| `/shorten` | `DELETE` | Delete a short URL (requires auth) |
+
+But focus on the first two for now.
+
+---
+
+## Request/Response Format
+**Question:** *JSON, Protocol Buffers, XML? Any specific fields required?*
+
+**Interviewer:** Use **JSON** – it's the standard for REST APIs. Keep it simple.
+
+**POST /shorten Request:**
+```json
+{
+  "long_url": "https://example.com/very/long/path",
+  "custom_alias": "my-link",        // optional
+  "expiration_days": 30              // optional
+}
+```
+
+**Successful Response (201 Created):**
+```json
+{
+  "short_url": "https://short.url/abc123",
+  "short_code": "abc123",
+  "long_url": "https://example.com/very/long/path",
+  "created_at": "2025-03-08T10:37:00Z"
+}
+```
+
+**Error Response (e.g., 400 Bad Request):**
+```json
+{
+  "error": "Invalid URL format",
+  "code": "INVALID_URL"
+}
+```
+
+For the redirect endpoint, it's just a standard HTTP 301/302 with `Location` header – no JSON body needed.
+
+---
+
+## Authentication
+**Question:** *Do we need API keys, OAuth, JWT, or is the API public?*
+
+**Interviewer:** The API is **public**. No authentication required for creating short URLs or for redirects. This is a free, open service. (If we later add user accounts, we'd introduce API keys or OAuth, but that's out of scope for now.)
+
+---
+
+## Rate Limiting
+**Question:** *Should we implement rate limiting per user/IP? What limits?*
+
+**Interviewer:** Yes, absolutely. We need to prevent abuse (e.g., someone creating millions of URLs to spam). Implement rate limiting per **IP address**:
+
+- **URL creation:** 100 requests per hour per IP
+- **Redirects:** No rate limiting needed – they're cheap and should be unlimited
+
+Use a **token bucket** or **sliding window** algorithm. Return `429 Too Many Requests` with a `Retry-After` header when limit is exceeded.
+
+---
+
+## Idempotency
+**Question:** *Should some operations be idempotent? Do we need idempotency keys?*
+
+**Interviewer:** Good question. `POST /shorten` is **not** idempotent by default – if the client retries, you might create duplicate short URLs for the same long URL. This may or may not be acceptable.
+
+For this design, **idempotency is optional** but nice to have. If you want to implement it, clients can send an `Idempotency-Key` header (e.g., a UUID). The server would store the key and return the same result for subsequent requests with the same key within a time window (e.g., 24 hours). This prevents accidental duplicates caused by network retries.
+
+If you skip it, we can live with duplicates – it's not a critical failure. But mentioning it shows foresight.
+
+---
+
+## Pagination
+**Question:** *For list endpoints, do we need pagination (offset/limit, cursor)?*
+
+**Interviewer:** **Not applicable** for the core design. We don't have a "list all URLs" endpoint. If we later add user accounts and a dashboard to list a user's URLs, we would need pagination. But for now, it's out of scope.
+
+---
+
+## Versioning
+**Question:** *How should we handle API versioning (URL path, header)?*
+
+**Interviewer:** Use **URL path versioning** – it's simple and explicit:
+- `https://api.short.url/v1/shorten`
+- `https://api.short.url/v2/shorten`
+
+This allows us to introduce breaking changes in the future without affecting existing clients. For now, we can start with `/v1/`. If we don't version, we risk breaking existing integrations when we evolve the API.
+
+---
+
+## Summary Table
+
+| Aspect | Decision |
+|--------|----------|
+| **API style** | REST |
+| **Core endpoints** | `POST /v1/shorten`, `GET /{shortCode}` |
+| **Request format** | JSON |
+| **Authentication** | None (public) |
+| **Rate limiting** | 100 requests/hour per IP for creation |
+| **Idempotency** | Optional – can use `Idempotency-Key` header |
+| **Pagination** | Not needed |
+| **Versioning** | URL path (`/v1/`) |
+
+---
+
+## What the Candidate Should Do Next
+
+Now that you have these API specifications, you should:
+
+1. **Incorporate these endpoints** into your high‑level architecture diagram.
+2. **Explain how rate limiting** would be implemented (e.g., Redis + token bucket).
+3. **Discuss idempotency** if you choose to include it – where would you store the keys? (Redis with TTL)
+4. **Show how versioning** allows future evolution.
+
+Example:
+> "I'll design the API with `/v1/shorten` for creation and `GET /{shortCode}` for redirects. To prevent abuse, I'll implement rate limiting per IP using a token bucket in Redis. For idempotency, clients can optionally send an `Idempotency-Key` header, and I'll store the response in Redis for 24 hours to return on duplicate requests. This ensures we don't accidentally create duplicate URLs even if the client retries."
+
+This shows you've thought through the API design comprehensively.
