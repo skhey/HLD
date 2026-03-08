@@ -597,3 +597,113 @@ Example:
 > "I'll use DynamoDB because it's fully managed, scales automatically, and provides single‑digit millisecond latency for key‑value lookups. The table will have `short_code` as the partition key. For reads, I'll use `EventuallyConsistent` reads to reduce cost and latency. For writes, I'll use standard writes. If we add custom aliases, I'll use conditional writes with `ConsistentRead` to ensure uniqueness. For backups, I'll enable point‑in‑time recovery and export daily snapshots to S3 for long‑term archival. If we later need user‑specific queries, I'll add a Global Secondary Index on `user_id`."
 
 This shows you've thought through all aspects of the database design.
+
+
+
+# High-Level Architecture – URL Shortener (Interviewer's Answers)
+
+Here are the answers an interviewer might give to your clarifying questions about the high‑level architecture for a URL shortening service.
+
+---
+
+## Deployment Environment
+**Question:** *Cloud (AWS/GCP/Azure), on‑premises, or hybrid? Any specific services we can leverage?*
+
+**Interviewer:** We're building this for a cloud environment – let's assume **AWS** since it's widely used and has a rich set of managed services. You're free to mention equivalent services on other clouds if you prefer. Leveraging managed services will speed up development and reduce operational overhead.
+
+You can assume we have access to:
+- **Compute:** EC2, ECS (Fargate), or Lambda
+- **Load balancing:** Application Load Balancer (ALB) or Network Load Balancer (NLB)
+- **DNS:** Route 53
+- **CDN:** CloudFront
+- **Caching:** ElastiCache for Redis (or Memcached)
+- **Database:** DynamoDB (or RDS if you choose SQL)
+- **Message queue:** SQS or Kafka (MSK)
+- **Monitoring:** CloudWatch, X-Ray
+
+Feel free to pick the ones that make sense for your design.
+
+---
+
+## Components
+**Question:** *What major building blocks are needed (load balancers, web servers, caches, databases, queues)?*
+
+**Interviewer:** Based on the requirements, the core components are:
+- **DNS (Route 53):** For domain resolution and geo‑routing.
+- **CDN (CloudFront):** Optional but recommended for caching static assets and potentially redirects for hot URLs.
+- **Load Balancer (ALB):** Distributes incoming traffic across application servers; terminates SSL.
+- **Application Servers (EC2/ECS/Lambda):** Stateless, handle shortening and redirection logic.
+- **Cache (ElastiCache for Redis):** Stores frequently accessed mappings to reduce database load.
+- **Database (DynamoDB):** Persistent storage for all URL mappings.
+- **Message Queue (SQS) + Workers (optional):** For decoupling analytics processing from the main request path.
+
+You may also include a **Key Generation Service (KGS)** as a separate component if you choose that approach for short code generation.
+
+---
+
+## Communication
+**Question:** *Synchronous (HTTP/gRPC) or asynchronous (message queues)? For which parts?*
+
+**Interviewer:**
+- **Synchronous (HTTP):** All user‑facing operations – shortening and redirection – are synchronous. Clients expect immediate responses.
+- **Asynchronous (message queue):** Analytics events (click tracking) should be sent asynchronously to avoid slowing down redirects. The redirect path publishes a message to a queue, and workers process it later.
+
+So, the main request path is synchronous; the analytics pipeline is asynchronous.
+
+---
+
+## Geographical Distribution
+**Question:** *Single region or multi‑region? Active‑active or active‑passive?*
+
+**Interviewer:** The service is global, so we should aim for **multi‑region deployment** to reduce latency for users worldwide. However, for the core design, you can start with a **single region** and explain how you would extend to multiple regions.
+
+If you go multi‑region:
+- Use **Route 53 latency‑based or geo‑DNS** to route users to the nearest region.
+- For the database, you have two options:
+  - **Active‑passive:** One region handles writes, others are read‑replicas. Writes from other regions are forwarded to the primary. Simpler, but write latency is higher for users far from the primary.
+  - **Active‑active:** All regions accept writes, with data replicated asynchronously between regions. More complex (conflict resolution needed), but lower write latency.
+
+For a URL shortener, eventual consistency is acceptable, so **active‑active with DynamoDB Global Tables** (or Cassandra multi‑region) is a viable choice. You can mention both and discuss trade‑offs.
+
+---
+
+## Existing Services
+**Question:** *Are there existing components we can reuse (e.g., CDN, identity provider, monitoring)?*
+
+**Interviewer:** Yes, leverage AWS managed services as mentioned:
+- **CDN:** CloudFront – can cache redirect responses for popular URLs.
+- **Monitoring:** CloudWatch for metrics, logs, and alarms; X‑Ray for tracing.
+- **Identity provider:** Not needed (public API).
+- **Secrets management:** AWS Secrets Manager (if we later add API keys).
+- **Auto‑scaling:** EC2 Auto Scaling groups or ECS service auto‑scaling.
+
+You can also mention using **Terraform** or **CloudFormation** for infrastructure as code, but it's not required for the design discussion.
+
+---
+
+## Summary Table
+
+| Aspect | Decision / Guidance |
+|--------|---------------------|
+| **Deployment environment** | AWS (managed services preferred) |
+| **Core components** | DNS, CDN (optional), Load Balancer, App Servers, Cache, Database, Queue |
+| **Communication** | Sync for user requests; async for analytics |
+| **Geographical distribution** | Multi‑region (active‑active or active‑passive) – discuss trade‑offs |
+| **Existing services** | Leverage CloudFront, Route53, ElastiCache, DynamoDB, SQS, CloudWatch |
+
+---
+
+## What the Candidate Should Do Next
+
+Now that you have these architecture guidelines, you should:
+
+1. **Draw a high‑level diagram** showing all components and how they interact.
+2. **Explain the data flow** for both URL creation and redirection.
+3. **Justify your component choices** based on the non‑functional requirements (scale, latency, availability).
+4. **Discuss how you'd handle multi‑region** if you have time.
+5. **Mention any trade‑offs** (e.g., using DynamoDB Global Tables adds complexity but improves global write latency).
+
+Example:
+> "I'll design a multi‑region active‑active architecture using Route53 for geo‑routing, CloudFront at the edge, and DynamoDB Global Tables for data replication. Each region has its own load balancer, stateless application servers, and a local Redis cache. Redirects are served from cache when possible; cache misses hit the local DynamoDB replica. Analytics events are published to a regional SQS queue and processed asynchronously. This gives us low latency worldwide and high availability."
+
+This demonstrates you've considered all aspects of the architecture.
