@@ -448,3 +448,152 @@ Example:
 > "I'll design the API with `/v1/shorten` for creation and `GET /{shortCode}` for redirects. To prevent abuse, I'll implement rate limiting per IP using a token bucket in Redis. For idempotency, clients can optionally send an `Idempotency-Key` header, and I'll store the response in Redis for 24 hours to return on duplicate requests. This ensures we don't accidentally create duplicate URLs even if the client retries."
 
 This shows you've thought through the API design comprehensively.
+
+
+# Database Design – URL Shortener (Interviewer's Answers)
+
+Here are the answers an interviewer might give to your clarifying questions about database design for a URL shortening service.
+
+---
+
+## Data Model
+**Question:** *What entities and relationships exist? (e.g., users, posts, orders)*
+
+**Interviewer:** For the core design, we have a very simple data model with just one main entity:
+
+**URL Mapping**
+- `short_code` (string, unique identifier)
+- `long_url` (string)
+- `created_at` (timestamp)
+- `expiration` (timestamp, optional)
+- `user_id` (optional – if we add user accounts later)
+
+There are no relationships between entities. It's essentially a key-value store: given a short code, retrieve the long URL.
+
+If we add analytics later, we'd have a separate entity for **Click Events**:
+- `id` (unique identifier)
+- `short_code` (string)
+- `timestamp`
+- `referrer`
+- `user_agent`
+- `ip_address` (or geolocation data)
+
+But for now, focus on the URL mappings.
+
+---
+
+## Database Type
+**Question:** *SQL or NoSQL? Any preference (e.g., PostgreSQL, Cassandra, DynamoDB)?*
+
+**Interviewer:** This is a key design decision. You need to justify your choice. I'll give you the requirements, and you decide:
+
+We need:
+- **High read throughput** (thousands of QPS)
+- **Low latency** (<10ms for reads)
+- **Horizontal scalability** (data will grow to TBs)
+- **Simple key-value lookups** (no complex joins)
+- **High availability** (99.99%)
+
+Based on these, a **NoSQL key-value store** is a natural fit. Options:
+- **DynamoDB** (fully managed, auto-scaling, consistent performance)
+- **Cassandra** (open source, excellent write scalability, tunable consistency)
+- **Redis** (in-memory only – not suitable as primary store for TBs of data)
+
+I have no strong preference – choose one and justify it. DynamoDB is simpler to operate; Cassandra gives you more control. Both are acceptable.
+
+If you choose SQL (e.g., PostgreSQL with sharding), explain how you'd handle scaling and why. That's also valid but more complex.
+
+---
+
+## Access Patterns
+**Question:** *What are the main queries (e.g., lookup by ID, range scans, joins)?*
+
+**Interviewer:** Very simple:
+- **Primary query:** `SELECT long_url FROM url_mappings WHERE short_code = :code` – this is 99.9% of queries.
+- **Insert:** `INSERT INTO url_mappings (short_code, long_url, created_at) VALUES (...)`
+- **Optional (if we add user accounts):** `SELECT * FROM url_mappings WHERE user_id = :user_id ORDER BY created_at DESC` – this would be a secondary access pattern.
+
+No range scans, no joins, no complex aggregations on the main table.
+
+---
+
+## Indexing
+**Question:** *Which fields need indexes? Any composite indexes?*
+
+**Interviewer:**
+- **Primary index:** `short_code` – this is the main lookup key. In NoSQL, this is the partition key.
+- **Secondary index:** If we add user accounts, we'd need an index on `user_id` to list a user's URLs. In DynamoDB, that would be a Global Secondary Index (GSI). In Cassandra, you'd create a secondary index or denormalize.
+
+No composite indexes needed for the core design.
+
+---
+
+## Sharding/Partitioning
+**Question:** *Should we design for sharding? What shard key makes sense?*
+
+**Interviewer:** Yes, we need to design for horizontal scaling from the start because we'll have terabytes of data.
+
+**Shard key:** `short_code` is the obvious choice. It's how we access data 99% of the time, so it ensures queries are routed to a single shard. In DynamoDB, this is the partition key. In Cassandra, it's the primary key's partition key.
+
+If we use a hash-based sharding (consistent hashing), we get even distribution. With 3.5 trillion possible short codes, the distribution will be uniform.
+
+For the user‑listing query (if added), it would become a scatter‑gather operation across all shards, which is inefficient. That's a trade‑off we accept for the primary access pattern's efficiency. We could mitigate by also storing data by user_id in a separate table (denormalization).
+
+---
+
+## Consistency Level
+**Question:** *For NoSQL, what read/write consistency levels should we target?*
+
+**Interviewer:** Based on our earlier non‑functional requirements:
+
+- **For redirects (reads):** Eventual consistency is acceptable. In DynamoDB, use `EventuallyConsistent` reads (cheaper, lower latency). In Cassandra, use `ONE` or `LOCAL_ONE`.
+- **For writes (new URLs):** We need durability. In DynamoDB, use `STANDARD` write (acknowledged after replication to multiple AZs). In Cassandra, use `QUORUM` or `LOCAL_QUORUM` to ensure the write is persisted on multiple nodes.
+- **For custom aliases (if implemented):** We need strong consistency to ensure uniqueness. Use a conditional write with `ConsistentRead` in DynamoDB, or `SERIAL` consistency in Cassandra.
+
+So we'll use **tunable consistency** – weaker for reads, stronger for writes where uniqueness matters.
+
+---
+
+## Backup and Recovery
+**Question:** *Do we need point‑in‑time recovery, replication, or snapshots?*
+
+**Interviewer:** Yes. For a production system with 99.99% availability and permanent data retention, we need:
+
+- **Automated backups:** Daily snapshots (or continuous backups) to recover from accidental deletion or corruption.
+- **Point‑in‑time recovery (PITR):** Ability to restore to any point within the last 35 days (DynamoDB feature). This protects against human errors.
+- **Cross‑region replication:** Optional but recommended for disaster recovery. If the primary region goes down, we can fail over to a replica.
+
+In DynamoDB, you'd enable PITR and consider Global Tables for multi‑region replication. In Cassandra, you'd use `nodetool snapshot` and replicate to another cluster.
+
+For our design, at minimum, we need **daily backups** and **replication within the region** (across AZs). Multi‑region is a nice‑to‑have.
+
+---
+
+## Summary Table
+
+| Aspect | Decision |
+|--------|----------|
+| **Data model** | Single table: `url_mappings` (short_code, long_url, created_at, expiration, user_id) |
+| **Database type** | NoSQL (DynamoDB or Cassandra) – justify your choice |
+| **Access patterns** | Primary: lookup by short_code; Secondary: list by user_id (optional) |
+| **Indexing** | Primary key on short_code; GSI on user_id (optional) |
+| **Shard key** | `short_code` (hash-based for even distribution) |
+| **Consistency** | Eventual for reads, strong for writes with uniqueness (custom aliases) |
+| **Backup** | Daily snapshots + point‑in‑time recovery |
+
+---
+
+## What the Candidate Should Do Next
+
+Now that you have these database requirements, you should:
+
+1. **Choose a specific database** (e.g., DynamoDB) and justify why it fits the access patterns and scale.
+2. **Design the table schema** with partition key, sort key (if any), and attributes.
+3. **Explain how sharding works** – e.g., consistent hashing in Cassandra, or DynamoDB's automatic partitioning.
+4. **Discuss how you'd handle the secondary access pattern** (user's URLs) – e.g., denormalize into a separate table or use a GSI.
+5. **Describe the backup strategy** – e.g., enable PITR, daily exports to S3.
+
+Example:
+> "I'll use DynamoDB because it's fully managed, scales automatically, and provides single‑digit millisecond latency for key‑value lookups. The table will have `short_code` as the partition key. For reads, I'll use `EventuallyConsistent` reads to reduce cost and latency. For writes, I'll use standard writes. If we add custom aliases, I'll use conditional writes with `ConsistentRead` to ensure uniqueness. For backups, I'll enable point‑in‑time recovery and export daily snapshots to S3 for long‑term archival. If we later need user‑specific queries, I'll add a Global Secondary Index on `user_id`."
+
+This shows you've thought through all aspects of the database design.
