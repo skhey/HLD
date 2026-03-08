@@ -186,3 +186,118 @@ For this interview, you can focus on a single region but be prepared to discuss 
 | **Geo distribution** | Global audience – multi‑region desired |
 
 You now have a complete set of non‑functional requirements to inform your design decisions. Next, you can move on to **traffic estimation and capacity planning** using these numbers.
+
+
+
+# Traffic Estimation and Capacity Planning – URL Shortener (Interviewer's Answers)
+
+Here are the answers an interviewer might give to your clarifying questions about traffic estimation and capacity planning for a URL shortening service.
+
+---
+
+## Daily Active Users (DAU)
+**Question:** *Rough estimate? (e.g., 1M, 100M)*
+
+**Interviewer:** For a URL shortener, DAU isn't the best metric because many users may create URLs infrequently. Instead, let's focus on **operations per month** as we discussed earlier:
+- **New URLs per month:** 100 million
+- **Redirects per month:** 10 billion
+
+You can derive daily numbers from these. If you need DAU for creation, assume about **10–20 million users** might create at least one URL per month, but it's not critical. Focus on the operation counts.
+
+---
+
+## Actions per User
+**Question:** *How many reads/writes per user per day?*
+
+**Interviewer:** This is already captured in the read/write ratio. For creation, a "user" might create 1–2 URLs per session, but we don't have user accounts. Better to stick with the **100:1 read/write ratio** we already established:
+- **Writes:** 100M new URLs/month → ~3.3M/day
+- **Reads:** 10B redirects/month → ~333M/day
+
+If you want per "creator," you could say each creator generates about 5–10 URLs on average, but it's not necessary for capacity planning.
+
+---
+
+## Peak Factor
+**Question:** *What is the expected peak‑to‑average ratio (e.g., 2×, 5×)?*
+
+**Interviewer:** Assume:
+- **Daily peaks:** 2–3× average traffic (e.g., evenings in each time zone)
+- **Viral spikes:** Occasionally, a link may go viral and cause a short burst of 10–20× normal traffic for that specific URL
+
+For infrastructure sizing, design for **3× average** for general traffic, but also discuss how you'd handle extreme spikes (caching, CDN, auto‑scaling).
+
+---
+
+## Data Size
+**Question:** *Average size of each data item (e.g., record, file, message)?*
+
+**Interviewer:** Estimate per stored URL:
+- **Short code:** 6–7 characters (7 bytes)
+- **Long URL:** Average 200 characters (200 bytes) – some longer, some shorter
+- **Metadata:** Creation timestamp, expiration (if any), user ID (optional) – approx 100 bytes
+- **Total per record:** ~300–500 bytes. Let's use **500 bytes** to be safe and include overhead.
+
+For analytics events (if we add them later), each click event might be ~100 bytes (timestamp, short code, referrer, user agent, IP).
+
+---
+
+## Retention Period
+**Question:** *How long do we keep data (e.g., 1 year, 5 years, forever)?*
+
+**Interviewer:** Assume we keep mappings **permanently** – at least **5–10 years**. Short URLs should not expire by default. If we later add expiration as a feature, it will be user‑controlled, but for core design, plan for indefinite storage.
+
+For analytics, we might keep detailed data for 30–90 days and aggregated data forever.
+
+---
+
+## Replication Factor
+**Question:** *For durability, do we need multiple copies (e.g., 3×)?*
+
+**Interviewer:** Yes, to achieve 99.99% durability and availability, assume we need **3× replication** across availability zones or nodes. This is typical for production systems (e.g., DynamoDB, Cassandra, S3). Use **3×** in your storage calculations.
+
+---
+
+## Growth Rate
+**Question:** *How fast is the data expected to grow (e.g., 20% per year)?*
+
+**Interviewer:** Assume **steady growth** of about **20–30% per year** in new URL creations. This is reasonable for a popular service. Your capacity plan should account for this growth over a 5‑year horizon.
+
+---
+
+## Summary of Numbers for Your Calculations
+
+| Metric | Value |
+|--------|-------|
+| New URLs per month | 100 million |
+| New URLs per day | ~3.33 million |
+| Redirects per month | 10 billion |
+| Redirects per day | ~333 million |
+| Read/write ratio | 100:1 |
+| Peak factor (general) | 3× average |
+| Peak factor (viral) | 10–20× (handle with caching/CDN) |
+| Record size | ~500 bytes |
+| Retention | 5+ years (permanent) |
+| Replication factor | 3× |
+| Annual growth | 20–30% |
+
+---
+
+## What the Candidate Should Do Next
+
+Now that you have these numbers, you should:
+
+1. **Calculate average and peak QPS** for reads and writes.
+2. **Estimate daily storage growth** and 5‑year total with replication.
+3. **Estimate bandwidth** for redirects (egress).
+4. **Estimate cache size** (e.g., cache the top 20% of URLs).
+5. **Use these numbers** to justify your choice of database, caching tier, and scaling strategy.
+
+Example:
+- Write QPS average: 3.33M / 86,400 ≈ 38 writes/sec
+- Write QPS peak (3×): 115 writes/sec
+- Read QPS average: 333M / 86,400 ≈ 3,850 reads/sec
+- Read QPS peak (3×): 11,550 reads/sec
+- Daily storage: 3.33M × 500 bytes = 1.67 GB/day
+- 5‑year storage: 1.67 GB × 365 × 5 ≈ 3.05 TB × 3 (replication) ≈ 9.15 TB
+
+These numbers will drive your design decisions.
